@@ -46,10 +46,19 @@ jobs:
               description: 'Running POC check...'
             });
 
-      - name: Checkout PR merge ref
+      # Deliberately NOT using github.event.workflow_run.pull_requests[0]:
+      # empirically, that array is EMPTY when the head repo is a fork (GitHub
+      # only populates it for same-repository PRs), so `refs/pull/<n>/merge`
+      # built from it resolves to an invalid ref for exactly the fork-PR case
+      # this whole POC exists to test. head_sha/head_repository on the
+      # (nested) workflow_run object ARE populated for forks and are trusted
+      # (they describe the completed run, not attacker-supplied content), so
+      # use those to check out the PR's head commit directly instead.
+      - name: Checkout PR head commit
         uses: actions/checkout@v5
         with:
-          ref: refs/pull/${{ github.event.workflow_run.pull_requests[0].number }}/merge
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           path: src
           persist-credentials: false
 
