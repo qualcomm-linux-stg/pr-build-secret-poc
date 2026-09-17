@@ -54,6 +54,16 @@ jobs:
       # (nested) workflow_run object ARE populated for forks and are trusted
       # (they describe the completed run, not attacker-supplied content), so
       # use those to check out the PR's head commit directly instead.
+      #
+      # actions/checkout also refuses this by default with an explicit "pwn
+      # request" warning (checking out fork PR code from a workflow_run
+      # workflow). That guard is real and correct in general — but this POC
+      # exists specifically to test the risk profile of a trusted stage
+      # checking out and executing fork PR content (which is exactly what the
+      # real pkg-build-reusable-workflow.yml / debusine.yml build job does
+      # once it checks out `inputs.debian-ref` / `source_ref`), so opt in
+      # deliberately rather than being blocked by, or accidentally
+      # bypassing, the safety net.
       - name: Checkout PR head commit
         uses: actions/checkout@v5
         with:
@@ -61,6 +71,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
           path: src
           persist-credentials: false
+          allow-unsafe-pr-checkout: true
 
       # No POC_TOKEN in this step's env. This step runs whatever the PR
       # supplies (src/attack.sh), the same way the real build job runs
