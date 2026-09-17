@@ -29,6 +29,23 @@ jobs:
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
+      # POC Hook itself cannot write this: GITHUB_TOKEN is forced read-only
+      # for pull_request runs triggered by a fork. This workflow_run-triggered
+      # job is not subject to that restriction, so it sets both the pending
+      # and (later) final status.
+      - name: Set pending status
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.workflow_run.head_sha,
+              state: 'pending',
+              context: 'POC Check',
+              description: 'Running POC check...'
+            });
+
       - name: Checkout PR merge ref
         uses: actions/checkout@v5
         with:
@@ -96,13 +113,15 @@ jobs:
       - name: Set final status
         if: always()
         uses: actions/github-script@v9
+        env:
+          JOB_STATUS: ${{ job.status }}
         with:
           script: |
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
               sha: context.payload.workflow_run.head_sha,
-              state: '${{ job.status }}' === 'success' ? 'success' : 'failure',
+              state: process.env.JOB_STATUS === 'success' ? 'success' : 'failure',
               context: 'POC Check',
               description: 'POC check finished'
             });
