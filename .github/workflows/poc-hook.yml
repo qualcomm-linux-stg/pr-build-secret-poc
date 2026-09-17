@@ -1,0 +1,31 @@
+name: POC Hook
+
+# Untrusted stage, mirroring debusine-pr-hook.yml: runs on `pull_request`
+# (using the PR branch's own copy of this file), grants no secrets and only
+# the minimal permissions needed to set a commit status. Does not check out
+# or execute anything from the PR — the only PR-derived data it touches is
+# the trusted event payload (head SHA), never PR-controlled file content.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  set-pending-status:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set pending status
+        uses: actions/github-script@v9
+        with:
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.payload.pull_request.head.sha,
+              state: 'pending',
+              context: 'POC Check',
+              description: 'Running POC check...'
+            });
