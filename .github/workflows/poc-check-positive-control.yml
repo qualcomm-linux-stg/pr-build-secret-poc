@@ -17,7 +17,7 @@ jobs:
   prove-capture-works:
     runs-on: ubuntu-latest
     steps:
-      - name: "Untrusted" step, but with the secret deliberately left in scope
+      - name: Untrusted-in-name-only step (secret deliberately left in scope)
         env:
           POC_TOKEN: ${{ secrets.POC_TOKEN }}
         run: |
