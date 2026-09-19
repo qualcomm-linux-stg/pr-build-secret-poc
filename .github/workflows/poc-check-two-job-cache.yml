@@ -1,0 +1,129 @@
+name: POC Check Two Job Cache
+
+# TESTS A CHANNEL THE JOB BOUNDARY DOES NOT CLOSE.
+#
+# poc-check-two-job.yml showed that a fresh runner per job defeats the PATH
+# hijack: $GITHUB_PATH, $RUNNER_TEMP and job A's filesystem simply do not
+# exist in job B. But the Actions cache is explicitly designed to survive
+# across jobs and runs, so it is a persistence channel that a job boundary
+# alone cannot stop.
+#
+# This matters specifically in workflow_run context: github.ref is the default
+# branch here, so the cache scope is refs/heads/main. An untrusted job running
+# in this context can therefore WRITE a cache entry that later trusted jobs --
+# and other workflows on main -- will restore.
+#
+# Realistic shape being modelled: job A runs a build and caches a tool/
+# dependency directory; job B restores that cache to get its upload tooling
+# (debusine-client, yq, etc.) and then invokes something from it while holding
+# the credential. That is exactly how a cached toolchain is normally used.
+#
+# The cache key is scoped to this run id on purpose: a stable key would leave
+# a poisoned entry in this repo's default-branch cache scope affecting
+# unrelated workflows. The mechanism is identical either way -- only the blast
+# radius differs.
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: ["POC Hook"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  process-pr-content:
+    name: Job A - process PR content and populate cache (no secrets)
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head commit
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: src
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+
+      # Stands in for a real cached toolchain / dependency directory that a
+      # build job would populate.
+      - name: Run PR-supplied content with a cache directory in play
+        env:
+          POC_CACHE_DIR: ${{ github.workspace }}/cached-tools
+        run: |
+          set -u
+          mkdir -p "${POC_CACHE_DIR}"
+          echo "placeholder tool" > "${POC_CACHE_DIR}/README"
+          if [ -f src/attack-cache.sh ]; then
+            echo "Found src/attack-cache.sh, running it"
+            bash src/attack-cache.sh
+          else
+            echo "No src/attack-cache.sh in this PR, nothing to run"
+          fi
+          echo "--- cache dir contents after PR content ran ---"
+          ls -la "${POC_CACHE_DIR}"
+
+      - name: Save cache (as a build job legitimately would)
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/cached-tools
+          key: poc-poison-${{ github.run_id }}
+
+  credentialed-upload:
+    name: Job B - restore cache then use credential
+    needs: process-pr-content
+    runs-on: ubuntu-latest
+    steps:
+      - name: Restore cache (expecting a clean toolchain)
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/cached-tools
+          key: poc-poison-${{ github.run_id }}
+
+      - name: Inspect what was restored
+        run: |
+          set -u
+          echo "--- restored cache contents ---"
+          ls -la "${GITHUB_WORKSPACE}/cached-tools" || echo "(nothing restored)"
+
+      # The normal way a cached toolchain gets used. Job B is not doing
+      # anything obviously reckless here -- it is trusting its own cache.
+      - name: Put restored tool dir on PATH
+        run: |
+          set -u
+          if [ -d "${GITHUB_WORKSPACE}/cached-tools" ]; then
+            echo "${GITHUB_WORKSPACE}/cached-tools" >> "$GITHUB_PATH"
+          fi
+
+      - name: Stand-in credentialed upload
+        env:
+          POC_TOKEN: ${{ secrets.POC_TOKEN }}
+        run: |
+          set -u
+          echo "Resolved curl: $(command -v curl)"
+          curl -s -o /dev/null -w 'stand-in upload HTTP status: %{http_code}\n' https://example.com/ || true
+
+      - name: Report whether the poisoned cache captured anything
+        if: always()
+        run: |
+          set -u
+          {
+            echo "## Job B (cache restore) findings"
+            echo
+            echo "Resolved curl: $(command -v curl)"
+            if [ -s "${RUNNER_TEMP}/curl-capture.txt" ]; then
+              echo "- :x: poisoned cache survived the job boundary and captured the credential"
+            else
+              echo "- :white_check_mark: no capture from the restored cache"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-job-cache-captures-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/curl-capture.txt
+          if-no-files-found: ignore
