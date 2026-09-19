@@ -1,0 +1,97 @@
+name: POC Check Two Job Safe
+
+# SAFE VARIANT — this is the pattern to copy.
+#
+# Identical to poc-check-two-job-naive.yml in every respect except how job B
+# consumes the PR-derived value: it goes through `env:` and is referenced as a
+# shell variable ("$VERSION"), never interpolated into the script text with
+# ${{ }}. Shell metacharacters the PR supplied therefore stay inert data
+# rather than becoming live code next to the secret.
+#
+# Together with poc-check-two-job.yml (which proves the job boundary defeats
+# the PATH hijack) this is the full candidate fix for qli-ci#39:
+#   1. separate jobs for untrusted work vs credentialed work, AND
+#   2. never interpolate anything the untrusted job produced.
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: ["POC Hook"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  process-pr-content:
+    name: Job A - derive a value from PR content (no secrets)
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+    steps:
+      - name: Checkout PR head commit
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: src
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+
+      - name: Derive version from PR content
+        id: derive
+        run: |
+          set -u
+          if [ -f src/pr-version.txt ]; then
+            version="$(head -n 1 src/pr-version.txt)"
+          else
+            version="0.0.0-no-file"
+          fi
+          echo "derived version: ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  credentialed-upload:
+    name: Job B - credentialed upload (has secret, SAFE consumption)
+    needs: process-pr-content
+    runs-on: ubuntu-latest
+    steps:
+      # THE FIX: the PR-derived value is bound to an environment variable and
+      # referenced as "$VERSION". GitHub never substitutes it into the script
+      # text, so bash treats it as a plain string no matter what it contains.
+      - name: Log the version being uploaded (safe consumption)
+        env:
+          POC_TOKEN: ${{ secrets.POC_TOKEN }}
+          VERSION: ${{ needs.process-pr-content.outputs.version }}
+        run: |
+          set -u
+          echo "Building version $VERSION"
+
+      - name: Stand-in credentialed upload
+        env:
+          POC_TOKEN: ${{ secrets.POC_TOKEN }}
+        run: |
+          set -u
+          curl -s -o /dev/null -w 'stand-in upload HTTP status: %{http_code}\n' https://example.com/ || true
+
+      - name: Report whether injection captured anything
+        if: always()
+        run: |
+          set -u
+          {
+            echo "## Job B (safe consumption) findings"
+            echo
+            if [ -s "${RUNNER_TEMP}/injection-capture.txt" ]; then
+              echo "- :x: injected code ran in job B and captured something - see artifact"
+            else
+              echo "- :white_check_mark: no injection capture file produced - value stayed inert data"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload injection captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-job-safe-captures-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/injection-capture.txt
+          if-no-files-found: ignore

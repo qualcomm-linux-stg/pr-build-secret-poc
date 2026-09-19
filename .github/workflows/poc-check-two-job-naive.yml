@@ -1,0 +1,104 @@
+name: POC Check Two Job Naive
+
+# DELIBERATELY VULNERABLE VARIANT — do not copy this pattern.
+#
+# Tests whether splitting into two jobs is sufficient on its own. It is not:
+# this variant does the job split correctly (job A has no secrets, job B has
+# the secret and never runs src/attack.sh) but then makes the classic mistake
+# of interpolating a value job A derived from PR content directly into a
+# `run:` block in job B via ${{ }}. By the time that interpolated shell code
+# executes, job B legitimately has the secret in scope, so the PR gets
+# arbitrary code execution next to the credential anyway.
+#
+# This is the same class of bug as the LAVA BUILD_DOWNLOAD_URL hand-off noted
+# in qli-ci#39, and the same class zizmor caught in this very POC earlier (the
+# `${{ job.status }}` finding). The zizmor suppression below is only so this
+# intentionally-broken demo can live in the repo without failing the security
+# gate for everyone else; it is NOT an endorsement.
+#
+# The safe counterpart is poc-check-two-job-safe.yml.
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: ["POC Hook"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  process-pr-content:
+    name: Job A - derive a value from PR content (no secrets)
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.derive.outputs.version }}
+    steps:
+      - name: Checkout PR head commit
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: src
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+
+      # Stands in for anything real CI legitimately reads out of a PR:
+      # dpkg-parsechangelog output, a version string, an artifact URL, etc.
+      - name: Derive version from PR content
+        id: derive
+        run: |
+          set -u
+          if [ -f src/pr-version.txt ]; then
+            version="$(head -n 1 src/pr-version.txt)"
+          else
+            version="0.0.0-no-file"
+          fi
+          echo "derived version: ${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+  credentialed-upload:
+    name: Job B - credentialed upload (has secret, NAIVE consumption)
+    needs: process-pr-content
+    runs-on: ubuntu-latest
+    steps:
+      # THE BUG: ${{ }} interpolation of a PR-derived value straight into a
+      # shell command, in a step that has the secret in env. GitHub substitutes
+      # the value into the script text before bash ever sees it, so any shell
+      # metacharacters the PR supplied become live code here.
+      - name: Log the version being uploaded (vulnerable interpolation)
+        env:
+          POC_TOKEN: ${{ secrets.POC_TOKEN }}
+        run: | # zizmor: ignore[template-injection]
+          set -u
+          echo "Building version ${{ needs.process-pr-content.outputs.version }}"
+
+      - name: Stand-in credentialed upload
+        env:
+          POC_TOKEN: ${{ secrets.POC_TOKEN }}
+        run: |
+          set -u
+          curl -s -o /dev/null -w 'stand-in upload HTTP status: %{http_code}\n' https://example.com/ || true
+
+      - name: Report whether injection captured anything
+        if: always()
+        run: |
+          set -u
+          {
+            echo "## Job B (naive consumption) findings"
+            echo
+            if [ -s "${RUNNER_TEMP}/injection-capture.txt" ]; then
+              echo "- :x: injected code ran in job B and captured something - see artifact"
+            else
+              echo "- :white_check_mark: no injection capture file produced"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload injection captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-job-naive-captures-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/injection-capture.txt
+          if-no-files-found: ignore

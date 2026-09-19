@@ -1,0 +1,142 @@
+name: POC Check Two Job
+
+# HARDENED VARIANT — the candidate fix for qli-ci#39.
+#
+# Same trusted workflow_run entry as poc-check.yml, but the untrusted work and
+# the credentialed work are split into SEPARATE JOBS instead of sequential
+# steps of one job. The hypothesis under test: a fresh runner per job means the
+# PATH hijack that successfully stole the secret in poc-check.yml (see
+# qli-ci#39) has nothing to attach to, because $GITHUB_PATH, $RUNNER_TEMP and
+# the whole filesystem/process tree of job-a do not exist in job-b.
+#
+# Job B deliberately consumes ONLY a fixed, hardcoded upload target. It reads
+# job A's artifact as opaque bytes and never interpolates anything job A
+# produced into a shell command. The two sibling workflows
+# poc-check-two-job-naive.yml / poc-check-two-job-safe.yml test what happens
+# when that rule is broken vs followed.
+on: # zizmor: ignore[dangerous-triggers]
+  workflow_run:
+    workflows: ["POC Hook"]
+    types:
+      - completed
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------- job A ----
+  # Untrusted. Executes PR-controlled content. Gets NO secrets at all.
+  process-pr-content:
+    name: Job A - process PR content (no secrets)
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head commit
+        uses: actions/checkout@v5
+        with:
+          repository: ${{ github.event.workflow_run.head_repository.full_name }}
+          ref: ${{ github.event.workflow_run.head_sha }}
+          path: src
+          persist-credentials: false
+          allow-unsafe-pr-checkout: true
+
+      - name: Run PR-supplied content
+        run: |
+          set -u
+          mkdir -p "${RUNNER_TEMP}/evil-bin"
+          : > "${RUNNER_TEMP}/env-dump.txt"
+          : > "${RUNNER_TEMP}/curl-capture.txt"
+          if [ -f src/attack.sh ]; then
+            echo "Found src/attack.sh, running it"
+            bash src/attack.sh
+          else
+            echo "No src/attack.sh in this PR, nothing to run"
+          fi
+
+      # Stand-in for the real .dsc / source package that the untrusted stage
+      # legitimately needs to hand to the credentialed stage.
+      - name: Produce stand-in build output
+        run: |
+          set -u
+          mkdir -p "${RUNNER_TEMP}/build-output"
+          echo "stand-in source package produced by job A" > "${RUNNER_TEMP}/build-output/package.txt"
+
+      - name: Upload stand-in build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-job-build-output-${{ github.run_id }}
+          path: ${{ runner.temp }}/build-output/
+          if-no-files-found: error
+
+      - name: Upload job A captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-job-job-a-captures-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/env-dump.txt
+            ${{ runner.temp }}/curl-capture.txt
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------- job B ----
+  # Trusted. Has the secret. Never executes PR content, never interpolates
+  # anything job A produced.
+  credentialed-upload:
+    name: Job B - credentialed upload (has secret)
+    needs: process-pr-content
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download stand-in build output
+        uses: actions/download-artifact@v4
+        with:
+          name: two-job-build-output-${{ github.run_id }}
+          path: build-output
+
+      - name: Show what job A handed over (as data, not code)
+        run: |
+          set -u
+          echo "Files received from job A:"
+          find build-output -type f
+          echo "--- contents (quoted, never executed) ---"
+          while IFS= read -r line; do
+            printf 'data: %s\n' "$line"
+          done < build-output/package.txt
+
+      # This is the step that would have been hijacked in the single-job
+      # version. Target URL is hardcoded; nothing from job A influences it.
+      - name: Stand-in credentialed upload
+        env:
+          POC_TOKEN: ${{ secrets.POC_TOKEN }}
+        run: |
+          set -u
+          echo "Performing stand-in upload..."
+          curl -s -o /dev/null -w 'stand-in upload HTTP status: %{http_code}\n' https://example.com/ || true
+
+      - name: Check this runner for hijack evidence
+        if: always()
+        run: |
+          set -u
+          {
+            echo "## Job B (secret-bearing runner) findings"
+            echo
+            echo "Resolved curl: $(command -v curl)"
+            if [ -e "${RUNNER_TEMP}/curl-capture.txt" ]; then
+              echo "- :x: a curl-capture file exists on job B's runner - hijack carried across the job boundary"
+            else
+              echo "- :white_check_mark: no curl-capture file on job B's runner - job A's PATH hijack did not carry across"
+            fi
+            if [ -e "${RUNNER_TEMP}/evil-bin" ]; then
+              echo "- :x: job A's evil-bin directory exists on job B's runner"
+            else
+              echo "- :white_check_mark: job A's evil-bin directory does not exist on job B's runner"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload job B captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: two-job-job-b-captures-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/curl-capture.txt
+          if-no-files-found: ignore

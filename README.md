@@ -33,6 +33,29 @@ throwaway repo secret, not a real credential) for `DEBUSINE_TOKEN` /
   capture/detection method actually would catch a real leak rather than being
   silently broken.
 
+### Two-job variants
+
+`poc-check.yml` above **leaks** — the PATH hijack works, because both steps
+share one runner. These three variants test the candidate fix. All chain off
+the same `POC Hook`, so one fork PR exercises every variant at once.
+
+- **`poc-check-two-job.yml`** — the hardened candidate: untrusted work in job
+  A (no secrets), credentialed work in job B (fresh runner, has the secret,
+  hardcoded upload target). Tests whether the job boundary defeats the PATH
+  hijack. Job B self-checks its own runner for hijack evidence.
+
+- **`poc-check-two-job-naive.yml`** — **deliberately vulnerable, do not copy.**
+  Splits into two jobs correctly, then interpolates a PR-derived value into a
+  `run:` block in job B with `${{ }}`. Tests whether the job split alone is
+  sufficient (it isn't). Reads its payload from `pr-version.txt` in the PR.
+
+- **`poc-check-two-job-safe.yml`** — same as naive, but passes the value
+  through `env:` and references `$VERSION`. Tests that safe consumption of the
+  same attacker-controlled value stays inert.
+
+Together the last two isolate the variable: identical job topology, identical
+attacker input, only the consumption style differs.
+
 All "capture" steps write to local files uploaded as workflow artifacts
 (`env-dump`, `curl-capture`) — nothing is sent to any external endpoint.
 Findings are read back from those artifacts, not from anything the PR branch
