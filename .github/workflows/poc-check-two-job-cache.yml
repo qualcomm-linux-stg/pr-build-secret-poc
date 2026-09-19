@@ -87,6 +87,23 @@ jobs:
           path: ${{ github.workspace }}/cached-tools
           key: poc-poison-${{ github.run_id }}
 
+      # Sanity check: separate path/key, seeded ahead of time by a
+      # workflow_dispatch run (which CAN write). Confirms restore genuinely
+      # works in workflow_run context, so "Cache not found" above is not
+      # itself a sign that reads are broken here too.
+      - name: Restore stable diagnostic cache (sanity check)
+        id: restore-stable
+        uses: actions/cache/restore@v4
+        with:
+          path: /tmp/diag-cache
+          key: poc-cache-diagnostic-stable-v1
+
+      - name: Report stable cache sanity check
+        run: |
+          set -u
+          echo "stable cache-hit: ${{ steps.restore-stable.outputs.cache-hit }}"
+          cat /tmp/diag-cache/file.txt 2>&1 || echo "(stable cache file not present)"
+
       - name: Inspect what was restored
         run: |
           set -u
