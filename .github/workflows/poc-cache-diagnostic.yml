@@ -1,0 +1,33 @@
+name: POC Cache Diagnostic
+
+# Isolates whether the "token has no writable scopes" cache-save failure
+# seen in poc-check-two-job-cache.yml is specific to the workflow_run context,
+# or a repo/org-wide Actions cache policy. No workflow_run, no fork, no PR
+# involved at all - just a plain manual trigger on main with actions: write.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  try-save:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create a file to cache
+        run: |
+          mkdir -p /tmp/diag-cache
+          echo "hello" > /tmp/diag-cache/file.txt
+
+      - name: Try to save cache
+        id: save
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/diag-cache
+          key: poc-cache-diagnostic-${{ github.run_id }}
+
+      - name: Report
+        run: |
+          echo "cache-hit output: ${{ steps.save.outputs.cache-hit }}"
